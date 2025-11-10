@@ -14,7 +14,6 @@ function hexToRgb(hex: string) {
   const b = bigint & 255;
   return { r, g, b };
 }
-
 function luminance({ r, g, b }: { r: number; g: number; b: number }) {
   const a = [r, g, b].map(v => {
     v = v / 255;
@@ -22,7 +21,6 @@ function luminance({ r, g, b }: { r: number; g: number; b: number }) {
   });
   return 0.2126 * a[0] + 0.7152 * a[1] + 0.0722 * a[2];
 }
-
 function contrastRatio(fgHex: string, bgHex: string) {
   const L1 = luminance(hexToRgb(fgHex));
   const L2 = luminance(hexToRgb(bgHex));
@@ -30,70 +28,78 @@ function contrastRatio(fgHex: string, bgHex: string) {
   const darker = Math.min(L1, L2);
   return (lighter + 0.05) / (darker + 0.05);
 }
+const pad = (n: number, width: number) => n.toString().padStart(width, '0');
 
 export default function Page() {
+  // --- SINGLE ---
   const [text, setText] = useState<string>('https://telkomaterial.co.id');
   const [size, setSize] = useState<number>(384);
   const [margin, setMargin] = useState<number>(16);
   const [ecc, setEcc] = useState<ECC>('M');
-  const [fg, setFg] = useState<string>('#0f172a'); // warna depan
-  const [bg, setBg] = useState<string>('#ffffff'); // warna latar
+  const [fg, setFg] = useState<string>('#0f172a'); // depan
+  const [bg, setBg] = useState<string>('#ffffff'); // latar
   const [auto, setAuto] = useState<boolean>(true);
   const canvasRef = useRef<HTMLCanvasElement>(null);
 
+  // --- BATCH ---
+  const [prefix, setPrefix] = useState<string>('TGR');
+  const [start, setStart] = useState<number>(1);
+  const [end, setEnd] = useState<number>(100);
+  const [widthPad, setWidthPad] = useState<number>(3); // 3 -> 001
+
   const ratio = useMemo(() => contrastRatio(fg, bg), [fg, bg]);
-  const lowContrast = ratio < 4.5; // ambang WCAG teks normal—pakai sebagai indikator aman discan
+  const lowContrast = ratio < 4.5;
 
   const opts = useMemo(
     () => ({
       errorCorrectionLevel: ecc,
       color: { dark: fg, light: bg },
-      margin: 0, // margin manual biar quiet zone rapi
+      margin: 0,
       width: size,
       scale: 1,
     }),
     [ecc, fg, bg, size]
   );
 
-  async function render() {
+  // helper bikin canvas QR utk text tertentu (dipakai Single & Batch)
+  async function makeQRCanvas(payload: string, px: number) {
     const base = document.createElement('canvas');
-    await QRCode.toCanvas(base, text || ' ', opts);
+    await QRCode.toCanvas(base, payload || ' ', {
+      errorCorrectionLevel: ecc,
+      color: { dark: fg, light: bg },
+      margin: 0,
+      width: px,
+      scale: 1,
+    });
+    return base;
+  }
 
-    const out = canvasRef.current;
-    if (!out) return;
+  async function render() {
+    const base = await makeQRCanvas(text, size);
+    const out = canvasRef.current; if (!out) return;
     const m = Math.max(0, margin);
     out.width = (base.width || size) + m * 2;
     out.height = (base.height || size) + m * 2;
 
-    const ctx = out.getContext('2d');
-    if (!ctx) return;
+    const ctx = out.getContext('2d'); if (!ctx) return;
     ctx.imageSmoothingEnabled = false;
-
-    // latar luar
     ctx.fillStyle = bg;
     ctx.fillRect(0, 0, out.width, out.height);
-
-    // gambar QR
     ctx.drawImage(base, m, m);
-
-    // garis pinggir tipis untuk bantu visibilitas di latar apa pun
+    // border tipis bantu visibilitas
     ctx.strokeStyle = (luminance(hexToRgb(bg)) > 0.5) ? '#0f172a' : '#e2e8f0';
     ctx.lineWidth = 1;
     ctx.strokeRect(0.5, 0.5, out.width - 1, out.height - 1);
   }
 
-  // Auto-generate dengan debounce
+  // Auto-generate
   useEffect(() => {
     if (!auto) return;
     const t = setTimeout(render, 180);
     return () => clearTimeout(t);
   }, [text, size, margin, ecc, fg, bg, auto]);
 
-  // Render pertama
-  useEffect(() => {
-    render();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  useEffect(() => { render(); /* eslint-disable-line */ }, []);
 
   function downloadPNG() {
     const c = canvasRef.current; if (!c) return;
@@ -102,207 +108,238 @@ export default function Page() {
     a.href = c.toDataURL('image/png');
     a.click();
   }
-
   function downloadPDF() {
     const c = canvasRef.current; if (!c) return;
     const dataURL = c.toDataURL('image/png');
     const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
-    const x = 24, y = 28, w = 58, h = 58; // 58mm square
+    const x = 24, y = 28, w = 58, h = 58;
     pdf.addImage(dataURL, 'PNG', x, y, w, h, undefined, 'FAST');
     pdf.setFontSize(10);
     const lines = pdf.splitTextToSize(text, 120);
     pdf.text(lines, x, y + h + 6);
     pdf.save(`qr-${Date.now()}.pdf`);
   }
-
-  function copyText() {
-    navigator.clipboard.writeText(text).catch(() => {});
-  }
-
+  function copyText() { navigator.clipboard.writeText(text).catch(() => {}); }
   function fixContrast() {
-    // Ganti warna depan jadi putih jika latar gelap, atau hitam jika latar terang
     const bgLum = luminance(hexToRgb(bg));
     setFg(bgLum > 0.5 ? '#000000' : '#ffffff');
   }
 
   const presetSizes = [256, 320, 384, 448, 512];
-  const eccLevels: ECC[] = ['L', 'M', 'Q', 'H'];
+  const eccLevels: ECC[] = ['L','M','Q','H'];
+
+  // ==== BATCH: generate PDF grid A4 ====
+  async function batchToPdf() {
+    // Validasi
+    if (end < start) return alert('End harus >= Start');
+    const total = end - start + 1;
+    if (total > 1000) return alert('Batas aman 1000 kode per batch');
+
+    const pdf = new jsPDF({ unit: 'mm', format: 'a4' });
+    const page = { w: 210, h: 297 };
+    const marginMM = 10;
+    const cols = 4;
+    const rows = 7; // 4x7 = 28 label per halaman
+    const cellW = (page.w - marginMM * 2) / cols; // ~47.5mm
+    const cellH = (page.h - marginMM * 2) / rows; // ~39.6mm
+    const qrMM = Math.min(cellW, cellH) - 8; // padding dalam cell
+    const textYGap = 5;
+
+    let col = 0, row = 0, count = 0;
+    pdf.setFontSize(9);
+
+    for (let n = start; n <= end; n++) {
+      const code = `${prefix}${pad(n, widthPad)}`; // contoh: TGR001..TGR100
+      // Render QR kecil khusus untuk PDF (px tinggi agar tajam saat di-scale)
+      const px = 512; // tinggi pixel untuk kualitas baik
+      const base = await makeQRCanvas(code, px);
+      const dataURL = base.toDataURL('image/png');
+
+      const x = marginMM + col * cellW + (cellW - qrMM) / 2;
+      const y = marginMM + row * cellH + 4;
+      pdf.addImage(dataURL, 'PNG', x, y, qrMM, qrMM, undefined, 'FAST');
+
+      // teks kode di bawah QR
+      const textY = y + qrMM + textYGap;
+      pdf.text(code, x + qrMM / 2, textY, { align: 'center', maxWidth: cellW - 6 });
+
+      // next cell
+      col++;
+      count++;
+      if (col >= cols) { col = 0; row++; }
+      if (row >= rows && n !== end) {
+        pdf.addPage();
+        row = 0; col = 0;
+      }
+    }
+
+    pdf.save(`batch-${prefix}${pad(start, widthPad)}-to-${prefix}${pad(end, widthPad)}.pdf`);
+  }
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-      {/* Controls */}
-      <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-        <div className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-emerald-500/10 blur-3xl" />
-        <div className="space-y-4 relative">
-          <div>
-            <label className="block text-xs text-slate-300 mb-1">Isi QR (teks / URL)</label>
-            <div className="flex gap-2">
-              <input
-                className="w-full rounded-xl bg-slate-950/70 border border-white/10 px-3 py-2 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="https://contoh.com / SKU123 / teks bebas"
-              />
-              <button
-                onClick={copyText}
-                className="shrink-0 inline-flex items-center gap-2 rounded-xl px-3 py-2
-                          bg-emerald-500 text-black font-semibold
-                          shadow-sm hover:bg-emerald-400 active:bg-emerald-500
-                          focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300
-                          border border-emerald-400/60"
-                title="Salin ke clipboard"
-                aria-label="Salin ke clipboard"
-              >
-                {/* ikon clipboard */}
-                <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
-                    className="w-4 h-4" fill="currentColor" aria-hidden="true">
-                  <path d="M9 2a2 2 0 0 0-2 2H5.5A1.5 1.5 0 0 0 4 5.5v14A1.5 1.5 0 0 0 5.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8h-3a2 2 0 0 1-2-2V3H9zm4 1.414L17.586 8H15a1 1 0 0 1-1-1V3.414zM8 11h8v2H8v-2zm0 4h8v2H8v-2z"/>
-                </svg>
-                Salin
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+    <div className="space-y-8">
+      {/* === SINGLE GENERATOR === */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        {/* Controls */}
+        <section className="relative overflow-hidden rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+          <div className="absolute -top-24 -right-24 w-72 h-72 rounded-full bg-emerald-500/10 blur-3xl" />
+          <div className="space-y-4 relative">
             <div>
-              <label className="block text-xs text-slate-300 mb-1">Ukuran (px)</label>
-              <input
-                type="number"
-                min={128}
-                step={32}
-                value={size}
-                onChange={(e) => setSize(parseInt(e.target.value || '384', 10))}
-                className="w-full rounded-xl bg-slate-950/70 border border-white/10 px-3 py-2 text-slate-100"
-              />
-              <div className="flex flex-wrap gap-2 mt-2">
-                {presetSizes.map((s) => (
-                  <button
-                    key={s}
-                    onClick={() => setSize(s)}
-                    className={`px-2.5 py-1 rounded-lg text-xs border ${
-                      size === s
-                        ? 'bg-emerald-500 text-black border-emerald-400'
-                        : 'bg-slate-900/60 text-slate-200 border-white/10 hover:bg-slate-800'
-                    }`}
-                  >
-                    {s}
-                  </button>
-                ))}
+              <label className="block text-xs text-slate-300 mb-1">Isi QR (teks / URL)</label>
+              <div className="flex gap-2">
+                <input
+                  className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-emerald-400"
+                  value={text}
+                  onChange={(e) => setText(e.target.value)}
+                  placeholder="https://contoh.com / SKU123 / teks bebas"
+                />
+                <button
+                  onClick={copyText}
+                  className="shrink-0 inline-flex items-center gap-2 rounded-xl px-3 py-2
+                             bg-emerald-500 text-black font-semibold shadow-sm
+                             hover:bg-emerald-400 active:bg-emerald-500
+                             focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-300
+                             border border-emerald-400/60"
+                  title="Salin ke clipboard"
+                  aria-label="Salin ke clipboard"
+                >
+                  <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"
+                       className="w-4 h-4" fill="currentColor" aria-hidden="true">
+                    <path d="M9 2a2 2 0 0 0-2 2H5.5A1.5 1.5 0 0 0 4 5.5v14A1.5 1.5 0 0 0 5.5 21h11a1.5 1.5 0 0 0 1.5-1.5V8h-3a2 2 0 0 1-2-2V3H9zm4 1.414L17.586 8H15a1 1 0 0 1-1-1V3.414zM8 11h8v2H8v-2zm0 4h8v2H8v-2z"/>
+                  </svg>
+                  Salin
+                </button>
               </div>
             </div>
 
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Margin (px)</label>
-              <input
-                type="number"
-                min={0}
-                step={2}
-                value={margin}
-                onChange={(e) => setMargin(parseInt(e.target.value || '16', 10))}
-                className="w-full rounded-xl bg-slate-950/70 border border-white/10 px-3 py-2 text-slate-100"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Error Correction</label>
-              <div className="flex flex-wrap gap-2">
-                {eccLevels.map((level) => (
-                  <button
-                    key={level}
-                    onClick={() => setEcc(level)}
-                    className={`px-3 py-2 rounded-lg text-xs border ${
-                      ecc === level
-                        ? 'bg-emerald-500 text-black border-emerald-400'
-                        : 'bg-slate-900/60 text-slate-200 border-white/10 hover:bg-slate-800'
-                    }`}
-                  >
-                    {level}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Warna depan</label>
-              <input
-                type="color"
-                value={fg}
-                onChange={(e) => setFg(e.target.value)}
-                className="w-full h-10 rounded-lg bg-slate-950/70 border border-white/10"
-              />
-            </div>
-            <div>
-              <label className="block text-xs text-slate-300 mb-1">Warna latar</label>
-              <input
-                type="color"
-                value={bg}
-                onChange={(e) => setBg(e.target.value)}
-                className="w-full h-10 rounded-lg bg-slate-950/70 border border-white/10"
-              />
-            </div>
-
-            <div className="col-span-2 md:col-span-3 flex flex-col gap-2">
-              {/* Indikator kontras */}
-              <div className={`rounded-xl border px-3 py-2 text-xs flex items-center justify-between ${
-                lowContrast ? 'bg-amber-500/10 border-amber-400/30 text-amber-200' : 'bg-emerald-500/10 border-emerald-400/30 text-emerald-200'
-              }`}>
-                <span>
-                  Kontras: {ratio.toFixed(2)} {lowContrast ? '• Rendah (risiko sulit discan)' : '• Baik'}
-                </span>
-                {lowContrast && (
-                  <button onClick={fixContrast} className="ml-3 rounded-lg px-2 py-1 bg-amber-500/20 border border-amber-400/40 hover:bg-amber-500/30">
-                    Perbaiki otomatis
-                  </button>
-                )}
+            <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Ukuran (px)</label>
+                <input
+                  type="number" min={128} step={32} value={size}
+                  onChange={(e) => setSize(parseInt(e.target.value || '384', 10))}
+                  className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"
+                />
+                <div className="flex flex-wrap gap-2 mt-2">
+                  {[256, 320, 384, 448, 512].map(s => (
+                    <button key={s} onClick={() => setSize(s)}
+                      className={`px-2.5 py-1 rounded-lg text-xs border ${
+                        size===s? 'bg-emerald-500 text-black border-emerald-400':'bg-slate-900/60 text-slate-200 border-white/10 hover:bg-slate-800'
+                      }`}>
+                      {s}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div className="flex items-center justify-between gap-3">
-                <label className="inline-flex items-center gap-2 text-xs text-slate-300">
-                  <input
-                    type="checkbox"
-                    checked={auto}
-                    onChange={(e) => setAuto(e.target.checked)}
-                    className="accent-emerald-500"
-                  />
-                  Auto-generate saat mengetik
-                </label>
-                <div className="flex gap-2 ml-auto">
-                  <button
-                    onClick={render}
-                    className="rounded-xl bg-emerald-500 text-black font-semibold px-4 py-2"
-                  >
-                    Generate
-                  </button>
-                  <button
-                    onClick={downloadPNG}
-                    className="rounded-xl bg-slate-800 text-slate-100 border border-white/10 px-4 py-2 hover:bg-slate-700"
-                  >
-                    Unduh PNG
-                  </button>
-                  <button
-                    onClick={downloadPDF}
-                    className="rounded-xl bg-slate-800 text-slate-100 border border-white/10 px-4 py-2 hover:bg-slate-700"
-                  >
-                    Unduh PDF
-                  </button>
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Margin (px)</label>
+                <input
+                  type="number" min={0} step={2} value={margin}
+                  onChange={(e) => setMargin(parseInt(e.target.value || '16', 10))}
+                  className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Error Correction</label>
+                <div className="flex flex-wrap gap-2">
+                  {(['L','M','Q','H'] as ECC[]).map(level => (
+                    <button key={level} onClick={()=> setEcc(level)}
+                      className={`px-3 py-2 rounded-lg text-xs border ${
+                        ecc===level? 'bg-emerald-500 text-black border-emerald-400':'bg-slate-900/60 text-slate-200 border-white/10 hover:bg-slate-800'
+                      }`}>
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Warna depan</label>
+                <input type="color" value={fg} onChange={(e)=> setFg(e.target.value)}
+                  className="w-full h-10 rounded-lg bg-slate-950/70 border border-white/20"/>
+              </div>
+              <div>
+                <label className="block text-xs text-slate-300 mb-1">Warna latar</label>
+                <input type="color" value={bg} onChange={(e)=> setBg(e.target.value)}
+                  className="w-full h-10 rounded-lg bg-slate-950/70 border border-white/20"/>
+              </div>
+
+              <div className="col-span-2 md:col-span-3 flex flex-col gap-2">
+                <div className={`rounded-xl border px-3 py-2 text-xs flex items-center justify-between ${
+                  lowContrast ? 'bg-amber-500/10 border-amber-400/30 text-amber-200' : 'bg-emerald-500/10 border-emerald-400/30 text-emerald-200'
+                }`}>
+                  <span>Kontras: {ratio.toFixed(2)} {lowContrast ? '• Rendah (risiko sulit discan)' : '• Baik'}</span>
+                  {lowContrast && (
+                    <button onClick={fixContrast} className="ml-3 rounded-lg px-2 py-1 bg-amber-500/20 border border-amber-400/40 hover:bg-amber-500/30">
+                      Perbaiki otomatis
+                    </button>
+                  )}
+                </div>
+
+                <div className="flex items-center justify-between gap-3">
+                  <label className="inline-flex items-center gap-2 text-xs text-slate-300">
+                    <input type="checkbox" checked={auto} onChange={(e)=> setAuto(e.target.checked)}
+                      className="accent-emerald-500"/>
+                    Auto-generate saat mengetik
+                  </label>
+                  <div className="flex gap-2 ml-auto">
+                    <button onClick={render} className="rounded-xl bg-emerald-500 text-black font-semibold px-4 py-2">Generate</button>
+                    <button onClick={downloadPNG} className="rounded-xl bg-slate-800 text-slate-100 border border-white/10 px-4 py-2 hover:bg-slate-700">Unduh PNG</button>
+                    <button onClick={downloadPDF} className="rounded-xl bg-slate-800 text-slate-100 border border-white/10 px-4 py-2 hover:bg-slate-700">Unduh PDF</button>
+                  </div>
                 </div>
               </div>
             </div>
+          </div>
+        </section>
 
+        {/* Preview */}
+        <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm p-5 grid place-items-center min-h-[420px] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+          <div className="relative">
+            <div className="absolute -inset-4 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 blur-xl" />
+            <div className="relative p-4 rounded-2xl bg-[conic-gradient(at_50%_50%,#f8fafc_0_25%,#e2e8f0_0_50%,#f8fafc_0_75%,#e2e8f0_0)] [background-size:12px_12px]">
+              <canvas ref={canvasRef} className="bg-white rounded-xl shadow-2xl" />
+            </div>
+          </div>
+          <p className="mt-4 text-xs text-slate-300">Preview interaktif • Pastikan kontras memadai agar mudah dipindai.</p>
+        </section>
+      </div>
+
+      {/* === BATCH GENERATOR === */}
+      <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm p-5 shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
+        <h2 className="text-lg font-semibold mb-3">Batch QR — contoh: {prefix}{pad(start, widthPad)} s/d {prefix}{pad(end, widthPad)}</h2>
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
+          <div>
+            <label className="block text-xs text-slate-300 mb-1">Prefix</label>
+            <input value={prefix} onChange={(e)=> setPrefix(e.target.value.replace(/\s+/g,''))}
+              className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"/>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-300 mb-1">Start</label>
+            <input type="number" min={0} value={start} onChange={(e)=> setStart(parseInt(e.target.value||'1',10))}
+              className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"/>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-300 mb-1">End</label>
+            <input type="number" min={0} value={end} onChange={(e)=> setEnd(parseInt(e.target.value||'100',10))}
+              className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"/>
+          </div>
+          <div>
+            <label className="block text-xs text-slate-300 mb-1">Zero-pad</label>
+            <input type="number" min={1} max={6} value={widthPad} onChange={(e)=> setWidthPad(parseInt(e.target.value||'3',10))}
+              className="w-full rounded-xl bg-slate-950/70 border border-white/20 px-3 py-2 text-slate-100"/>
+          </div>
+          <div className="flex items-end">
+            <button onClick={batchToPdf}
+              className="w-full rounded-xl bg-emerald-500 text-black font-semibold px-4 py-2 hover:bg-emerald-400">
+              Generate PDF (Batch)
+            </button>
           </div>
         </div>
-      </section>
-
-      {/* Preview */}
-      <section className="rounded-2xl border border-white/10 bg-white/5 backdrop-blur-sm p-5 grid place-items-center min-h-[420px] shadow-[inset_0_1px_0_rgba(255,255,255,0.06)]">
-        <div className="relative">
-          <div className="absolute -inset-4 rounded-2xl bg-gradient-to-br from-emerald-500/10 to-cyan-500/10 blur-xl" />
-          <div className="relative p-4 rounded-2xl bg-[conic-gradient(at_50%_50%,#f8fafc_0_25%,#e2e8f0_0_50%,#f8fafc_0_75%,#e2e8f0_0)] [background-size:12px_12px]">
-            <canvas ref={canvasRef} className="bg-white rounded-xl shadow-2xl" />
-          </div>
-        </div>
-        <p className="mt-4 text-xs text-slate-300">
-          Preview interaktif • Pastikan kontras memadai agar mudah dipindai.
+        <p className="mt-2 text-xs text-slate-400">
+          Contoh hasil: <b>{prefix}{pad(1, widthPad)} .. {prefix}{pad(100, widthPad)}</b>. Grid otomatis (4×7 per halaman). Warna & ECC mengikuti setelan bagian atas.
         </p>
       </section>
     </div>
